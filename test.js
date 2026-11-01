@@ -11,6 +11,8 @@ const result = spawnSync(
   "curl",
   [
     "-fsS",
+    "--noproxy",
+    "*",
     "-o",
     "/dev/null",
     "-X",
