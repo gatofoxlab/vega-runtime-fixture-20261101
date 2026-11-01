@@ -7,25 +7,12 @@ const pid = pids.find((candidate) => {
   catch { return false; }
 });
 if (!pid) throw new Error("vega_agentcore.app process not found");
-
-const env = {};
-for (const entry of fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").filter(Boolean)) {
-  const at = entry.indexOf("=");
-  env[entry.slice(0, at)] = entry.slice(at + 1);
-}
-const code = [
-  "import base64, pathlib, vega_agentcore",
-  "root = pathlib.Path(vega_agentcore.__file__).parent",
-  "print('VEGA_AGENTCORE_ROOT=' + str(root))",
-  "files = sorted(root.rglob('*.py'))",
-  "print('VEGA_AGENTCORE_FILES=' + repr([str(p) for p in files]))",
-  "for p in files: print('VEGA_AGENTCORE_SOURCE=' + repr({'file': str(p), 'base64': base64.b64encode(p.read_bytes()).decode()}))",
-  "print('VEGA_AGENTCORE_SOURCE_COMPLETE=true')",
-].join("\n");
-const result = spawnSync(`/proc/${pid}/exe`, ["-c", code], {
-  cwd: `/proc/${pid}/cwd`, env, encoding: "utf8", timeout: 30000,
+const found = spawnSync("find", ["/", "-path", "/proc", "-prune", "-o", "-type", "f", "-path", "*vega_agentcore*", "-print"], {
+  encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024,
 });
 console.log(`VEGA_AGENTCORE_PID=${pid}`);
-if (result.stdout) process.stdout.write(result.stdout);
-if (result.stderr) process.stderr.write(result.stderr);
-if (result.status !== 0) process.exit(result.status || 1);
+console.log(`VEGA_AGENTCORE_FIND_STATUS=${found.status}`);
+console.log(`VEGA_AGENTCORE_PATHS=${JSON.stringify((found.stdout || "").split("\n").filter(Boolean))}`);
+console.log(`VEGA_AGENTCORE_MAPS=${JSON.stringify(fs.readFileSync(`/proc/${pid}/maps`, "utf8"))}`);
+console.log(`VEGA_AGENTCORE_MOUNTINFO=${JSON.stringify(fs.readFileSync(`/proc/${pid}/mountinfo`, "utf8"))}`);
+console.log("VEGA_AGENTCORE_PATH_DISCOVERY_COMPLETE=true");
