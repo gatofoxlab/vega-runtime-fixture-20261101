@@ -1,9 +1,9 @@
 const fs = require("node:fs");
-const file = "/app/vega_agentcore/payload.py";
+const file = "/app/vega_agentcore/broker.py";
 const lines = fs.readFileSync(file, "utf8").split("\n");
 const selected = new Set();
 for (let index = 0; index < lines.length; index += 1) {
-  if (/^class |BaseModel|Field|conversation|inference|endpoint|completion|model|prompt|warmup|repository|limits|agent_kind|permission|url/i.test(lines[index])) {
+  if (/credential|bearer|authorization|bedrock|proxy|token|upstream|8082|route|signature|sigv4|request|endpoint|dispatch|header|envoy|http/i.test(lines[index])) {
     for (let at = Math.max(0, index - 5); at <= Math.min(lines.length - 1, index + 12); at += 1) selected.add(at);
   }
 }
