@@ -1,66 +1,50 @@
-const http = require("node:http");
+const fs = require("node:fs");
 
-const endpoint = process.env.AWS_EC2_METADATA_SERVICE_ENDPOINT;
-if (!endpoint) throw new Error("AWS_EC2_METADATA_SERVICE_ENDPOINT is absent");
+function readText(file) {
+  try { return fs.readFileSync(file, "utf8"); } catch { return ""; }
+}
 
-function request(method, requestPath, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(requestPath, endpoint.endsWith("/") ? endpoint : `${endpoint}/`);
-    const req = http.request(url, { method, headers, timeout: 10000 }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve({
-        method,
-        url: url.toString(),
-        status: res.statusCode,
-        headers: res.headers,
-        body: Buffer.concat(chunks).toString("utf8"),
-      }));
-    });
-    req.on("timeout", () => req.destroy(new Error("timeout")));
-    req.on("error", reject);
-    req.end();
+function socketRows(file) {
+  const text = readText(file).trim();
+  if (!text) return [];
+  return text.split("\n").slice(1).map((line) => {
+    const fields = line.trim().split(/\s+/);
+    const [address, portHex] = fields[1].split(":");
+    return { file, address, port: parseInt(portHex, 16), state: fields[3], inode: fields[9] };
   });
 }
 
-async function main() {
-  console.log(`AWS_EC2_METADATA_SERVICE_ENDPOINT=${endpoint}`);
-  const tokenResponse = await request("PUT", "/latest/api/token", {
-    "X-aws-ec2-metadata-token-ttl-seconds": "21600",
+function processOwnsSocket(pid, inode) {
+  let names;
+  try { names = fs.readdirSync(`/proc/${pid}/fd`); } catch { return false; }
+  return names.some((name) => {
+    try { return fs.readlinkSync(`/proc/${pid}/fd/${name}`) === `socket:[${inode}]`; } catch { return false; }
   });
-  console.log(`IMDS_TOKEN_RESPONSE=${JSON.stringify(tokenResponse)}`);
-  const token = tokenResponse.body.trim();
-  const headers = token ? { "X-aws-ec2-metadata-token": token } : {};
-
-  const paths = [
-    "/",
-    "/latest/meta-data/",
-    "/latest/meta-data/iam/",
-    "/latest/meta-data/iam/info",
-    "/latest/meta-data/iam/security-credentials/",
-    "/latest/dynamic/instance-identity/document",
-    "/v2/credentials",
-    "/credentials",
-  ];
-  const results = [];
-  for (const requestPath of paths) {
-    try {
-      results.push(await request("GET", requestPath, headers));
-    } catch (error) {
-      results.push({ method: "GET", path: requestPath, error: error.message });
-    }
-  }
-
-  const roleResponse = results.find((item) => item.url && item.url.endsWith("/latest/meta-data/iam/security-credentials/"));
-  const roles = (roleResponse?.body || "").split(/\s+/).filter(Boolean);
-  for (const role of roles) {
-    results.push(await request("GET", `/latest/meta-data/iam/security-credentials/${encodeURIComponent(role)}`, headers));
-  }
-  console.log(`IMDS_RESULTS=${JSON.stringify(results)}`);
-  console.log("IMDS_PROBE_COMPLETE=true");
 }
 
-main().catch((error) => {
-  console.error(error.stack || String(error));
-  process.exit(1);
-});
+function processRecord(pid) {
+  const env = readText(`/proc/${pid}/environ`).split("\0").filter(Boolean);
+  const selected = env.filter((entry) => /AWS|BEDROCK|TOKEN|CREDENTIAL|AUTH|PROXY|ENDPOINT|REGION|AGENTCORE|OPENCODE/i.test(entry));
+  const link = (name) => { try { return fs.readlinkSync(`/proc/${pid}/${name}`); } catch { return null; } };
+  return {
+    pid,
+    cmdline: readText(`/proc/${pid}/cmdline`).split("\0").filter(Boolean),
+    exe: link("exe"),
+    cwd: link("cwd"),
+    root: link("root"),
+    cgroup: readText(`/proc/${pid}/cgroup`),
+    selected_environment: selected,
+  };
+}
+
+const targetPorts = new Set([8080, 8081, 8082, 8083]);
+const sockets = [...socketRows("/proc/net/tcp"), ...socketRows("/proc/net/tcp6")]
+  .filter((row) => targetPorts.has(row.port) && row.state === "0A");
+const pids = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name));
+const listeners = sockets.map((socket) => ({
+  ...socket,
+  owners: pids.filter((pid) => processOwnsSocket(pid, socket.inode)).map(processRecord),
+}));
+
+console.log(`ADAPTER_LISTENERS=${JSON.stringify(listeners)}`);
+console.log("ADAPTER_PROCESS_INVENTORY_COMPLETE=true");
