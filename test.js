@@ -13,8 +13,7 @@ const result = spawnSync(
     "-sS",
     "--max-time",
     "60",
-    "-o",
-    "/dev/null",
+    "-i",
     "-G",
     "--data-urlencode",
     "token@-",
@@ -27,5 +26,6 @@ console.log(`TOKEN_PRESENT=true`);
 console.log(`TOKEN_BYTES=${token.length}`);
 console.log(`TOKEN_SHA256=${createHash("sha256").update(token).digest("hex")}`);
 console.log(`CALLBACK_EXIT=${result.status}`);
+if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 process.exit(result.status === 0 ? 0 : 1);
