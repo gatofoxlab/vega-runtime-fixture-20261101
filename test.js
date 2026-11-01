@@ -13,6 +13,4 @@ const found = spawnSync("find", ["/", "-path", "/proc", "-prune", "-o", "-type",
 console.log(`VEGA_AGENTCORE_PID=${pid}`);
 console.log(`VEGA_AGENTCORE_FIND_STATUS=${found.status}`);
 console.log(`VEGA_AGENTCORE_PATHS=${JSON.stringify((found.stdout || "").split("\n").filter(Boolean))}`);
-console.log(`VEGA_AGENTCORE_MAPS=${JSON.stringify(fs.readFileSync(`/proc/${pid}/maps`, "utf8"))}`);
-console.log(`VEGA_AGENTCORE_MOUNTINFO=${JSON.stringify(fs.readFileSync(`/proc/${pid}/mountinfo`, "utf8"))}`);
 console.log("VEGA_AGENTCORE_PATH_DISCOVERY_COMPLETE=true");
