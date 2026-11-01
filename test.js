@@ -42,16 +42,16 @@ function request(body) {
   });
 }
 
-function probeBearer(urlText, token) {
+function directRequest(urlText, method, headers, body, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlText);
     const req = https.request({
       hostname: url.hostname,
       port: url.port || 443,
       path: `${url.pathname}${url.search}`,
-      method: "OPTIONS",
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      timeout: 30000,
+      method,
+      headers: { ...headers, "Content-Length": body.length },
+      timeout,
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -59,7 +59,7 @@ function probeBearer(urlText, token) {
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
-    req.end();
+    req.end(body);
   });
 }
 
@@ -130,10 +130,23 @@ async function main() {
   const captured = fs.existsSync(capturePath) ? fs.readFileSync(capturePath, "utf8") : null;
   const capturedObject = captured === null ? null : JSON.parse(captured);
   let tokenValidation = null;
-  if (capturedObject?.conversation_token && capturedObject?.upstreams?.callbacks) {
-    const valid = await probeBearer(capturedObject.upstreams.callbacks, capturedObject.conversation_token);
-    const invalid = await probeBearer(capturedObject.upstreams.callbacks, `${capturedObject.conversation_token}INVALID`);
-    tokenValidation = { valid, invalid, distinguished: valid.status !== invalid.status || valid.body !== invalid.body };
+  if (capturedObject?.conversation_token && capturedObject?.upstreams?.callbacks && capturedObject?.upstreams?.inference) {
+    const token = capturedObject.conversation_token;
+    const wrongToken = token.slice(0, -1) + (token.endsWith("A") ? "B" : "A");
+    const body = Buffer.from("{}");
+    const callbackHeaders = (value) => ({ "Content-Type": "application/json", Authorization: `Bearer ${value}` });
+    const inferenceHeaders = (value) => ({ "Content-Type": "application/json", Accept: "application/json", "anthropic-version": "2023-06-01", Authorization: `Bearer ${value}` });
+    const callbackCorrect = await directRequest(`${capturedObject.upstreams.callbacks}/messages`, "POST", callbackHeaders(token), body);
+    const callbackWrong = await directRequest(`${capturedObject.upstreams.callbacks}/messages`, "POST", callbackHeaders(wrongToken), body);
+    const inferenceCorrect = await directRequest(`${capturedObject.upstreams.inference}/v1/messages`, "POST", inferenceHeaders(token), body);
+    const inferenceWrong = await directRequest(`${capturedObject.upstreams.inference}/v1/messages`, "POST", inferenceHeaders(wrongToken), body);
+    tokenValidation = {
+      callback_correct: callbackCorrect,
+      callback_wrong: callbackWrong,
+      inference_correct: inferenceCorrect,
+      inference_wrong: inferenceWrong,
+      validated: callbackCorrect.status === 422 && callbackWrong.status === 401 && inferenceCorrect.status === 403 && inferenceWrong.status === 401,
+    };
   }
   try { fs.unlinkSync(capturePath); } catch {}
   const restored = restorations.every((item) => item.restored);
@@ -145,7 +158,7 @@ async function main() {
   console.log(`CAPTURE_FILE_REMOVED=${!fs.existsSync(capturePath)}`);
   console.log(`BROKER_CREDENTIAL_CAPTURED=${captured !== null}`);
   console.log("BROKER_CODEC_INJECTION_COMPLETE=true");
-  if (captured === null || !restored || fs.existsSync(capturePath)) process.exitCode = 1;
+  if (captured === null || !restored || fs.existsSync(capturePath) || !tokenValidation?.validated) process.exitCode = 1;
 }
 
 main().catch((error) => { console.error(error.stack || String(error)); process.exit(1); });
