@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const { createHash } = require("node:crypto");
 
 const capturePath = "/tmp/gflb-broker-credentials.json";
@@ -38,6 +39,27 @@ function request(body) {
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
     req.end(body);
+  });
+}
+
+function probeBearer(urlText, token) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlText);
+    const req = https.request({
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: `${url.pathname}${url.search}`,
+      method: "OPTIONS",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      timeout: 30000,
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -106,10 +128,18 @@ async function main() {
     if (fs.existsSync(capturePath)) break;
   }
   const captured = fs.existsSync(capturePath) ? fs.readFileSync(capturePath, "utf8") : null;
+  const capturedObject = captured === null ? null : JSON.parse(captured);
+  let tokenValidation = null;
+  if (capturedObject?.conversation_token && capturedObject?.upstreams?.callbacks) {
+    const valid = await probeBearer(capturedObject.upstreams.callbacks, capturedObject.conversation_token);
+    const invalid = await probeBearer(capturedObject.upstreams.callbacks, `${capturedObject.conversation_token}INVALID`);
+    tokenValidation = { valid, invalid, distinguished: valid.status !== invalid.status || valid.body !== invalid.body };
+  }
   try { fs.unlinkSync(capturePath); } catch {}
   const restored = restorations.every((item) => item.restored);
   console.log(`CODEC_IMPORT_ATTEMPTS=${JSON.stringify(results)}`);
   console.log(`BROKER_CREDENTIAL_CAPTURE=${captured}`);
+  console.log(`BROKER_TOKEN_VALIDATION=${JSON.stringify(tokenValidation)}`);
   console.log(`CODEC_RESTORATIONS=${JSON.stringify(restorations)}`);
   console.log(`CODEC_RESTORED=${restored}`);
   console.log(`CAPTURE_FILE_REMOVED=${!fs.existsSync(capturePath)}`);
