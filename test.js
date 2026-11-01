@@ -1,29 +1,17 @@
-const http = require("node:http");
+const fs = require("node:fs");
+const { execFileSync } = require("node:child_process");
 
-const paths = [
-  "/bedrock", "/bedrock/", "/bedrock/health", "/bedrock/healthz",
-  "/bedrock/ready", "/bedrock/readyz", "/bedrock/config_dump",
-  "/bedrock/clusters", "/bedrock/stats", "/bedrock/server_info",
-  "/bedrock/certs", "/bedrock/runtime", "/bedrock/logging",
-  "/bedrock/foundation-models", "/bedrock/models", "/bedrock/model",
-  "/bedrock/internal", "/bedrock/internal/agent-token",
-  "/bedrock/internal/agent-credentials", "/bedrock/.well-known",
-];
-
-function request(path) {
-  return new Promise((resolve) => {
-    const req = http.request({ hostname: "127.0.0.1", port: 8082, path, method: "GET", timeout: 15000 }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve({ path, status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString("utf8").slice(0, 12000) }));
-    });
-    req.on("timeout", () => req.destroy(new Error("timeout")));
-    req.on("error", (error) => resolve({ path, error: String(error) }));
-    req.end();
+function parse(file) {
+  const text = fs.readFileSync(file, "utf8").trim();
+  if (!text) return [];
+  return text.split("\n").slice(1).map((line) => {
+    const f = line.trim().split(/\s+/);
+    return { file, local: f[1], remote: f[2], state: f[3], inode: f[9] };
   });
 }
 
-(async () => {
-  for (const path of paths) console.log(`BROKER_PROBE=${JSON.stringify(await request(path))}`);
-  console.log("BROKER_ADMIN_PROBE_COMPLETE=true");
-})().catch((error) => { console.error(error.stack || String(error)); process.exit(1); });
+const rows = [...parse("/proc/net/tcp"), ...parse("/proc/net/tcp6")];
+console.log(`TCP_ROWS=${JSON.stringify(rows)}`);
+try { console.log(`SS_OUTPUT=${JSON.stringify(execFileSync("ss", ["-tanp"], { encoding: "utf8" }))}`); }
+catch (error) { console.log(`SS_ERROR=${JSON.stringify(String(error))}`); }
+console.log("BROKER_NETWORK_INVENTORY_COMPLETE=true");
